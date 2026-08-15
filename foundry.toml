@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = ["lib"]
+solc = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+# `ffi` is deliberately absent, and should stay that way. It lets a Solidity test run arbitrary
+# shell commands, so any pipeline that compiles an untrusted fork of this template would be
+# executing that fork's author's code. Nothing here needs it.
