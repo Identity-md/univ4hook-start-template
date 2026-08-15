@@ -17,14 +17,41 @@ solved, so a new idea starts at the behaviour rather than at the scaffolding:
 ## Getting started
 
 ```bash
-git clone --recurse-submodules https://github.com/Identity-md/univ4hook-start-template
+git clone https://github.com/Identity-md/univ4hook-start-template
 cd univ4hook-start-template
 forge build
 forge test
 ```
 
-Requires [Foundry](https://book.getfoundry.sh/getting-started/installation). If you cloned without
-`--recurse-submodules`, run `git submodule update --init --recursive`.
+Requires [Foundry](https://book.getfoundry.sh/getting-started/installation). No submodule step and
+no `forge install`: dependencies are committed under `lib/`, so a plain clone builds offline.
+
+That is not only convenience. This template is built to be handed to an automated contributor whose
+work is re-run by a verifier in a container with **no network at all** — submodules there resolve to
+empty directories and every build fails. Committed dependencies are what make the template usable by
+the network it exists for.
+
+## Starting a new hook
+
+The starter contract is `src/Hook.sol` and its tests are `test/Hook.t.sol`. A real hook is named
+after its idea, and lives in its own pair of files:
+
+```solidity
+// test/FeeSplitHook.t.sol
+contract FeeSplitHookTest is BaseHookTest {
+    function hookArtifact() internal view virtual override returns (string memory) {
+        return "FeeSplitHook.sol:FeeSplitHook";
+    }
+}
+```
+
+That one override is the whole integration: the harness deploys your contract at an address encoding
+*its* permissions, installs it on the launch pool, and every inherited test keeps applying. Override
+`hookConstructorArgs()` too if the constructor takes more than the pool manager.
+
+Nothing else needs editing — and under the contributor network, nothing else *may* be: a job for
+`FeeSplitHook` is granted write access to `src/FeeSplitHook.sol` and `test/FeeSplitHook.t.sol` and
+no other path.
 
 ## The launch pool
 

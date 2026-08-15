@@ -10,7 +10,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {Hook} from "../src/Hook.sol";
+import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
 import {LaunchToken} from "../src/LaunchToken.sol";
 
 /**
@@ -53,7 +53,7 @@ abstract contract BaseHookTest is Deployers {
     /// @dev ETH handed to the test contract, so it can buy without further setup.
     uint256 internal constant TEST_ETH = 1_000 ether;
 
-    Hook internal hook;
+    BaseHook internal hook;
     LaunchToken internal token;
     int24 internal tickLower;
     int24 internal tickUpper;
@@ -100,10 +100,7 @@ abstract contract BaseHookTest is Deployers {
         modifyLiquidityRouter.modifyLiquidity(
             key,
             ModifyLiquidityParams({
-                tickLower: tickLower,
-                tickUpper: tickUpper,
-                liquidityDelta: int256(uint256(liquidity)),
-                salt: 0
+                tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: int256(uint256(liquidity)), salt: 0
             }),
             ZERO_BYTES
         );
@@ -122,15 +119,32 @@ abstract contract BaseHookTest is Deployers {
     }
 
     /**
-     * @dev Deploys {Hook} at an address encoding its own permissions.
+     * @dev Which contract this harness deploys, as a `File.sol:Contract` artifact identifier.
      *
-     * Override when the hook takes constructor arguments beyond the pool manager — keep the address
-     * derivation, change the `abi.encode`.
+     * `src/Hook.sol` is only ever the starting point. A job is named after its idea, so the network
+     * asks for `src/FeeSplitHook.sol` and `test/FeeSplitHook.t.sol` and grants write access to
+     * nothing else — this file included. Overriding this is how a differently-named hook inherits
+     * the whole launch pool without touching the harness.
      */
-    function deployHook() internal virtual returns (Hook) {
+    function hookArtifact() internal view virtual returns (string memory) {
+        return "Hook.sol:Hook";
+    }
+
+    /// @dev Constructor arguments for {hookArtifact}. Override for a hook taking more than the manager.
+    function hookConstructorArgs() internal view virtual returns (bytes memory) {
+        return abi.encode(manager);
+    }
+
+    /**
+     * @dev Deploys the hook at an address encoding its own permissions.
+     *
+     * Override {hookArtifact} to change which contract is deployed and {hookConstructorArgs} to
+     * change what it is given; the address derivation stays correct for both.
+     */
+    function deployHook() internal virtual returns (BaseHook) {
         address target = address(HOOK_BASE | _declaredFlags());
-        deployCodeTo("Hook.sol:Hook", abi.encode(manager), target);
-        return Hook(target);
+        deployCodeTo(hookArtifact(), hookConstructorArgs(), target);
+        return BaseHook(payable(target));
     }
 
     /// @dev Token balance of `account`, for asserting who a hook moved value to.
@@ -147,8 +161,8 @@ abstract contract BaseHookTest is Deployers {
      */
     function _declaredFlags() internal returns (uint160) {
         address probe = address(uint160(uint256(keccak256("hook.permission.probe"))));
-        vm.etch(probe, vm.getDeployedCode("Hook.sol:Hook"));
-        return flagsOf(Hook(probe).getHookPermissions());
+        vm.etch(probe, vm.getDeployedCode(hookArtifact()));
+        return flagsOf(BaseHook(payable(probe)).getHookPermissions());
     }
 
     /// @dev The address bits a hook with these permissions must carry.
