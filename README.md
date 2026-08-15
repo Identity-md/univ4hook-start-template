@@ -27,26 +27,20 @@ permission flags. `PoolManager` reads them from the address itself rather than c
 so it knows which callbacks to fire without an external call — and so a hook cannot change what it
 is permitted to do after deployment.
 
-The practical consequence: enabling a callback is a two-part change, and doing only half of it
-fails.
+The practical consequence: a hook must be deployed to an address that matches what
+`getHookPermissions()` returns, or `BaseHook`'s constructor reverts with `HookAddressNotValid`.
 
-1. Return `true` for it in `getHookPermissions()`.
-2. Deploy to an address whose low 14 bits match.
-
-`BaseHook`'s constructor calls `_validateHookAddress(this)`, so a mismatch reverts at deployment
-rather than producing a hook that silently never gets called.
-
-In tests, `deployCodeTo` writes the contract to an address you choose, which is why `HookTest` does
-not mine a salt. In production you mine a CREATE2 salt whose resulting address carries the right
-bits (`HookMiner` in `v4-periphery` does this).
+In production you mine a CREATE2 salt whose resulting address carries the right bits
+(`HookMiner` in `v4-periphery` does this). In tests, `deployCodeTo` writes the contract to an
+address you choose, so no mining is needed — and `HookTest` reads the permissions off the contract
+itself to work out which address that is. **Enabling a callback therefore needs no edit to the test
+scaffolding.** It adapts.
 
 ## Adding a callback
 
-To add `beforeSwap`, say — three edits:
-
-**`src/Hook.sol`** — flip the permission and override the callback. `BaseHook` declares the
-internal `_before*`/`_after*` methods; override those, not the external ones, and the
-`onlyPoolManager` check stays in place.
+To add `beforeSwap`, say — one file changes. Flip the permission and override the callback.
+`BaseHook` declares the internal `_before*`/`_after*` methods; override those, not the external
+ones, and the `onlyPoolManager` check stays in place.
 
 ```solidity
 function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -62,20 +56,14 @@ function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata p
 }
 ```
 
-**`test/Hook.t.sol`** — update the flags constant so the test deploys to a matching address:
-
-```solidity
-uint160 internal constant HOOK_FLAGS = uint160(Hooks.BEFORE_SWAP_FLAG);
-```
-
-Forgetting this second edit is the most common way a first hook fails, and the revert
-(`HookAddressNotValid`) does not say so.
+If the callback returns a delta that moves funds, set the matching `*ReturnDelta` permission too —
+it is a separate flag, and without it the `PoolManager` ignores the delta you return.
 
 ## Layout
 
 ```
 src/Hook.sol        the hook — all permissions off, nothing overridden
-test/Hook.t.sol     deployment scaffolding + permission assertions
+test/Hook.t.sol     deployment scaffolding, derived from the hook's own permissions
 foundry.toml        solc 0.8.26, cancun, no ffi
 remappings.txt      forge-std, uniswap-hooks, v4-core, v4-periphery, openzeppelin-contracts
 lib/forge-std
