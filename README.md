@@ -1,12 +1,18 @@
-# Uniswap v4 Hook — Starter Template
+# Uniswap v4 Hook — Launch Pool Starter
 
-A deliberately empty Uniswap v4 hook, built on OpenZeppelin's `BaseHook`, with the deployment
-scaffolding a hook needs already working. Fork it, turn on the callbacks you want, write the
-behaviour.
+An empty Uniswap v4 hook on OpenZeppelin's `BaseHook`, and a test harness that hands it a real
+launch pool: native ETH paired with a fresh one-billion-supply token, the entire supply already
+seeded as liquidity.
 
-Nothing here does anything yet. That is the point: the awkward parts of starting a v4 hook — the
-address/permission coupling, the remappings across three nested dependency trees, a test that can
-actually deploy the thing — are solved, and the contract itself is a blank canvas.
+The hook does nothing yet. That is the point — the awkward parts of starting a v4 hook are already
+solved, so a new idea starts at the behaviour rather than at the scaffolding:
+
+- **The address/permission coupling.** A v4 hook must live at an address encoding its own
+  permissions. The harness derives that address from the contract, so enabling a callback needs no
+  edit to the test setup.
+- **A pool to act on.** Tokens, an initialized pool, liquidity in range, and routers to swap
+  through — the environment every hook needs before a single assertion can be written.
+- **Remappings** across three nested dependency trees.
 
 ## Getting started
 
@@ -20,54 +26,93 @@ forge test
 Requires [Foundry](https://book.getfoundry.sh/getting-started/installation). If you cloned without
 `--recurse-submodules`, run `git submodule update --init --recursive`.
 
-## The one thing to understand about v4 hooks
+## The launch pool
 
-**A hook's address encodes its permissions.** The low 14 bits of the contract's address are the
-permission flags. `PoolManager` reads them from the address itself rather than calling the contract,
-so it knows which callbacks to fire without an external call — and so a hook cannot change what it
-is permitted to do after deployment.
+`BaseHookTest` builds this in `setUp`, so every test inherits it:
 
-The practical consequence: a hook must be deployed to an address that matches what
-`getHookPermissions()` returns, or `BaseHook`'s constructor reverts with `HookAddressNotValid`.
+```
+currency0  native ETH
+currency1  LaunchToken — 1,000,000,000e18, minted once, no mint function afterwards
+price      starts at tick 138000, ≈ 984k token per ETH (~1,016 ETH fully diluted)
+liquidity  the entire supply, in a single position below the starting price
+```
 
-In production you mine a CREATE2 salt whose resulting address carries the right bits
-(`HookMiner` in `v4-periphery` does this). In tests, `deployCodeTo` writes the contract to an
-address you choose, so no mining is needed — and `HookTest` reads the permissions off the contract
-itself to work out which address that is. **Enabling a callback therefore needs no edit to the test
-scaffolding.** It adapts.
+All liquidity sits *below* the starting tick, so seeding it costs **no ETH** — the position is pure
+token. Buyers swap ETH in, which walks the pool price down through the range and hands out token;
+the token's price *in ETH* therefore rises as it is bought. The pool accumulates the ETH. That is
+the launch curve, and it is why the pool can open with nothing but the token in it.
 
-## Adding a callback
+Native ETH rather than a mock WETH is deliberate: ETH settles differently from an ERC20, and that
+difference is where hooks most often break.
 
-To add `beforeSwap`, say — one file changes. Flip the permission and override the callback.
-`BaseHook` declares the internal `_before*`/`_after*` methods; override those, not the external
-ones, and the `onlyPoolManager` check stays in place.
+A test usually needs no setup of its own:
 
 ```solidity
-function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
-    return Hooks.Permissions({ ..., beforeSwap: true, ... });
-}
-
-function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
-    internal
-    override
-    returns (bytes4, BeforeSwapDelta, uint24)
-{
-    return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+function test_MyHookTakesItsCut() public {
+    swap(key, true, -1 ether, ZERO_BYTES);   // buy with 1 ETH
+    assertGt(token.balanceOf(address(hook)), 0);
 }
 ```
 
-If the callback returns a delta that moves funds, set the matching `*ReturnDelta` permission too —
-it is a separate flag, and without it the `PoolManager` ignores the delta you return.
+Inherited and ready to use: `manager`, `key`, `hook`, `token`, `swapRouter`,
+`modifyLiquidityRouter`, `donateRouter`, `ZERO_BYTES`, `tickLower` / `tickUpper`, and
+`swap(key, zeroForOne, amountSpecified, hookData)` — a negative amount is exact-input.
+
+## The one thing to understand about v4 hooks
+
+**A hook's address encodes its permissions.** The low 14 bits of the contract's address are the
+permission flags. `PoolManager` reads them from the address rather than calling the contract, so it
+knows which callbacks to fire without an external call — and a hook cannot change what it is
+permitted to do after deployment.
+
+In production you mine a CREATE2 salt whose resulting address carries the right bits (`HookMiner`
+in `v4-periphery` does this). In tests, `deployCodeTo` writes the contract to an address you choose,
+and `BaseHookTest` reads the permissions off the contract to work out which address that is.
+**Enabling a callback therefore needs no edit to the test scaffolding.** It adapts.
+
+Two related rules that produce confusing reverts:
+
+- A hook with **no** flags cannot be installed on a static-fee pool at all — v4 requires "at least 1
+  flag set, or a dynamic fee". That is why the starter pool opens dynamic-fee and becomes an
+  ordinary 0.30% pool the moment the hook enables anything. See `BaseHookTest.poolFee`.
+- A `*ReturnDelta` flag is separate from its action flag. Returning a delta from `_afterSwap`
+  without `afterSwapReturnDelta: true` is silently ignored.
+
+## Adding a callback
+
+One file changes. Flip the permission and override the callback. `BaseHook` declares the internal
+`_before*` / `_after*` methods; override those, not the external ones, and the `onlyPoolManager`
+check stays in place.
+
+```solidity
+function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+    return Hooks.Permissions({ ..., afterSwap: true, afterSwapReturnDelta: true, ... });
+}
+
+function _afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
+    internal
+    override
+    returns (bytes4, int128)
+{
+    return (this.afterSwap.selector, 0);
+}
+```
+
+Keep the constructor as `constructor(IPoolManager)`. Needing an owner is not a reason to add a
+parameter — `Ownable(msg.sender)` works and leaves the harness able to deploy the hook unchanged.
+If a hook genuinely needs more constructor arguments, override `BaseHookTest.deployHook`.
 
 ## Layout
 
 ```
-src/Hook.sol        the hook — all permissions off, nothing overridden
-test/Hook.t.sol     deployment scaffolding, derived from the hook's own permissions
-foundry.toml        solc 0.8.26, cancun, no ffi
-remappings.txt      forge-std, uniswap-hooks, v4-core, v4-periphery, openzeppelin-contracts
+src/Hook.sol           the hook — all permissions off, nothing overridden
+src/LaunchToken.sol    ERC20, one billion supply, fixed at construction
+test/BaseHookTest.sol  the launch pool: harness, address derivation, seeding
+test/Hook.t.sol        your assertions
+foundry.toml           solc 0.8.26, cancun, no ffi
+remappings.txt         forge-std, uniswap-hooks, v4-core, v4-periphery, openzeppelin, solmate
 lib/forge-std
-lib/uniswap-hooks   brings v4-core, v4-periphery and openzeppelin-contracts nested
+lib/uniswap-hooks      brings v4-core, v4-periphery, openzeppelin-contracts and solmate nested
 ```
 
 Dependencies come from [OpenZeppelin/uniswap-hooks](https://github.com/OpenZeppelin/uniswap-hooks),
@@ -82,6 +127,10 @@ fork's author's code.
 
 `evm_version` is `cancun` because v4 uses transient storage (`TSTORE`/`TLOAD`). Older EVM versions
 will not compile it.
+
+Seeding a position from `totalSupply()` rounds down to a whole number of liquidity units, so a few
+hundred wei stay with the deployer. `test_PoolHoldsTheEntireSupply` asserts that bound rather than
+an exact equality, because the exact equality is not achievable.
 
 ## License
 
